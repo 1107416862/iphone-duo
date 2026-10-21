@@ -10,6 +10,7 @@ function renderApp() {
   const loginOpens = [];
   const loginCookieSaves = [];
   const openedLinks = [];
+  const copiedTexts = [];
   const selectedAccounts = [];
   const manualOrders = [];
   const state = {
@@ -58,6 +59,7 @@ function renderApp() {
       placeOrder: async (accountId, target) => { manualOrders.push([accountId, target]); return null; },
       openPaymentLink: async (url) => { openedLinks.push(url); },
       copyPaymentLink: async () => {},
+      copyText: async (text) => { copiedTexts.push(text); },
       setPushUrls: async (urls) => {
         pushSaves.push(urls);
         // 模拟后端分栏存放。真正的归类规则在 Rust 侧，由 crates/apw-core/tests/config.rs 覆盖；
@@ -122,7 +124,8 @@ function renderApp() {
     scaleHint: () => control((element) => element.type === "span" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 个型号 × ")),
     accountTabs: () => all((element) => element?.type === "button" &&
-      element.props?.["aria-pressed"] !== undefined),
+      element.props?.["aria-pressed"] !== undefined &&
+      !String(element.props?.["aria-label"] ?? "").startsWith("筛选：")),
     sessionInput: () => control((element) => element?.props?.["aria-label"] === "账号 Cookie"),
     saveSession: () => control((element) => element.type === "Button" &&
       (element.props.children === "保存会话" ||
@@ -135,9 +138,15 @@ function renderApp() {
     orderButton: () => control((element) =>
       element?.props?.["aria-label"] === "把这条加入当前账号购物袋"),
     openPayment: () => control((element) => element.type === "Button" &&
-      Array.isArray(element.props.children) && element.props.children.includes(" 打开付款链接")),
+      Array.isArray(element.props.children) && element.props.children.includes(" 打开付款")),
+    sendToUser: () => control((element) => element.type === "Button" &&
+      Array.isArray(element.props.children) && element.props.children.includes(" 发给用户")),
+    // FilterChip 是本文件无法渲染的函数组件，直接拿它的 props 触发 onClick。
+    filterChip: (label) => control((element) =>
+      element?.props?.label === label && typeof element?.props?.onClick === "function"),
+    hasText: (text) => all((element) => element?.props?.children === text).length > 0,
     state, saved, addedTargets, pushSaves, sessionSaves, loginOpens, loginCookieSaves,
-    openedLinks, selectedAccounts,
+    openedLinks, copiedTexts, selectedAccounts,
     manualOrders,
   };
 }
@@ -455,9 +464,80 @@ test("a completed auto-order shows a payment link and an explicit same-session w
     }),
   ];
   app.state.selectedAccountId = "acct_1";
-  assert.equal(app.paymentLink().value, url);
+  assert.equal(app.paymentLink().children, url);
   app.openPayment().onClick();
   assert.deepEqual(app.openedLinks, [url]);
+});
+
+test("an added order can be copied as a message for the customer", async () => {
+  const url = "https://www.apple.com.cn/shop/bag";
+  const app = renderApp();
+  app.state.accounts = [
+    account("acct_1", "主账号", {
+      lastOrder: {
+        id: "order_1",
+        accountId: "acct_1",
+        partNumber: "B",
+        productName: "iPhone 18 Pro 512GB 银色",
+        storeTitle: "杭州万象城",
+        locale: "zh_CN",
+        status: "added",
+        message: "产品已添加到购物袋",
+        paymentUrl: url,
+        bagQuantity: 1,
+        attemptedAtMs: Date.UTC(2026, 9, 21, 12, 0, 0),
+      },
+    }),
+  ];
+  app.state.selectedAccountId = "acct_1";
+
+  app.sendToUser().onClick();
+  await new Promise(setImmediate);
+
+  assert.equal(app.copiedTexts.length, 1);
+  assert.match(app.copiedTexts[0], /iPhone 18 Pro 512GB 银色/);
+  assert.match(app.copiedTexts[0], /杭州万象城/);
+  assert.ok(app.copiedTexts[0].includes(url));
+});
+
+test("the monitoring list is a list that can be filtered by status", () => {
+  const app = renderApp();
+  app.state.accounts = [account("acct_1", "主账号")];
+  app.state.selectedAccountId = "acct_1";
+  app.state.rows = [
+    {
+      target: {
+        locale: "zh_CN",
+        storeNumber: "R532",
+        storeTitle: "杭州万象城",
+        partNumber: "B",
+        productName: "iPhone 18 Pro 512GB 银色",
+      },
+      availability: { kind: "out_of_stock" },
+      lastCheckedMs: null,
+      consecutiveFailures: 0,
+    },
+    {
+      target: {
+        locale: "zh_CN",
+        storeNumber: "R359",
+        storeTitle: "上海南京东路",
+        partNumber: "B",
+        productName: "iPhone 18 Pro 512GB 银色",
+      },
+      availability: { kind: "in_stock" },
+      lastCheckedMs: null,
+      consecutiveFailures: 0,
+    },
+  ];
+
+  assert.ok(app.hasText("杭州万象城"));
+  assert.ok(app.hasText("上海南京东路"));
+
+  app.filterChip("有货").onClick();
+
+  assert.equal(app.hasText("杭州万象城"), false);
+  assert.ok(app.hasText("上海南京东路"));
 });
 
 test("an in-stock row can be added to the selected account bag manually", async () => {

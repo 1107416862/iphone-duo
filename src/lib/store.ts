@@ -693,6 +693,17 @@ export async function copyPaymentLink(url: string): Promise<void> {
   }
 }
 
+/** 复制一段任意文本，用于把订单和付款链接发给客户。 */
+export async function copyText(text: string, successMessage: string): Promise<void> {
+  if (!text.trim()) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    pushLog(successMessage);
+  } catch (err) {
+    pushLog(`复制失败，请手动选中文本复制：${String(err)}`);
+  }
+}
+
 /**
  * 从 Apple 官网抓最新型号。
  *

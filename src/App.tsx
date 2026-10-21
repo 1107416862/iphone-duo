@@ -14,6 +14,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Send,
   Trash2,
   UserPlus,
   X,
@@ -63,6 +64,7 @@ import {
   checkAccountSession,
   clearAccountSession,
   connect,
+  copyText,
   copyPaymentLink,
   deleteAccount,
   dismissUpdate,
@@ -96,6 +98,7 @@ import {
   describeAvailability,
   formatTime,
   isUntrusted,
+  type OrderRecord,
   type Product,
   type SessionStatus,
   type Settings,
@@ -231,30 +234,56 @@ function RunState({ running }: { running: boolean }) {
   );
 }
 
-/** 一个统计数字。数字等宽：每轮查询都会变，几个并排时不该来回抖。 */
-function Stat({
+/** 监控列表的筛选按钮。数字等宽：每轮查询都会变，几个并排时不该来回抖。 */
+function FilterChip({
   label,
-  value,
+  count,
+  active,
   tone,
+  onClick,
 }: {
   label: string;
-  value: number;
+  count: number;
+  active: boolean;
   tone?: "inStock" | "unknown";
+  onClick: () => void;
 }) {
   return (
-    <span className="bg-card inline-flex items-baseline gap-1.5 rounded-md border px-2.5 py-1 text-sm shadow-xs">
-      <span className="text-muted-foreground text-xs">{label}</span>
+    <button
+      type="button"
+      aria-label={`筛选：${label}`}
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-baseline gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors",
+        active
+          ? "border-primary bg-accent text-foreground"
+          : "bg-card text-muted-foreground hover:bg-accent/60",
+      )}
+    >
+      <span>{label}</span>
       <span
         className={cn(
           "font-semibold tabular-nums",
-          value > 0 && tone === "inStock" && "text-in-stock",
-          value > 0 && tone === "unknown" && "text-unknown",
+          count > 0 && tone === "inStock" && "text-in-stock",
+          count > 0 && tone === "unknown" && "text-unknown",
         )}
       >
-        {value}
+        {count}
       </span>
-    </span>
+    </button>
   );
+}
+
+/** 发给客户的订单文案：商品、门店和付款链接一眼能看全。 */
+function describeOrderMessage(order: OrderRecord): string {
+  return [
+    "【Apple 到店取货】",
+    order.productName,
+    `门店：${order.storeTitle}`,
+    `付款链接：${order.paymentUrl}`,
+    "请在 10 分钟内用同一浏览器会话完成付款。",
+  ].join("\n");
 }
 
 /** 日志行。时间戳弱化，到货那几行用有货色标出来，一屏灰字里一眼能找到。 */
@@ -322,6 +351,10 @@ export default function App() {
   const [newAccountAppleId, setNewAccountAppleId] = useState("");
   // Cookie 草稿只存在内存里。已保存的原值永远不回显，避免截图和肩窥。
   const [sessionDraft, setSessionDraft] = useState("");
+  // 监控列表按状态筛选：统计数字和列表是同一份数据，不另开一套视图。
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "in_stock" | "out_of_stock" | "unknown"
+  >("all");
   function toggleSettings() {
     const next = !settingsOpen;
     setSettingsOpen(next);
@@ -336,7 +369,33 @@ export default function App() {
   const accounts = ui.accounts ?? [];
   const selectedAccount =
     accounts.find((account) => account.id === ui.selectedAccountId) ?? null;
-  const selectedOrder = selectedAccount?.lastOrder ?? null;
+
+  // 每个账号的最近一次加购结果汇总成一份订单列表，按时间倒序。
+  const orderList = useMemo(() => {
+    const known = ui.orders ?? {};
+    return accounts
+      .map((account) => ({
+        accountName: account.name,
+        order: known[account.id] ?? account.lastOrder,
+      }))
+      .filter(
+        (item): item is { accountName: string; order: OrderRecord } => item.order !== null,
+      )
+      .sort((a, b) => b.order.attemptedAtMs - a.order.attemptedAtMs);
+  }, [accounts, ui.orders]);
+
+  const visibleRows = useMemo(
+    () => {
+      if (statusFilter === "all") return ui.rows;
+      // 「查不到」只算真正查失败的项目，和统计数字保持同一口径；
+      // 还没轮到查询的「待查询」不算问题。
+      if (statusFilter === "unknown") {
+        return ui.rows.filter((row) => isUntrusted(row.availability));
+      }
+      return ui.rows.filter((row) => row.availability.kind === statusFilter);
+    },
+    [ui.rows, statusFilter],
+  );
 
   // 切换账号后清掉上一个账号的 Cookie 草稿，免得把 A 的会话存进 B。
   useEffect(() => {
@@ -540,7 +599,7 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="mx-auto flex h-screen max-w-6xl flex-col gap-3 p-5">
+      <div className="mx-auto flex h-screen max-w-6xl flex-col gap-3 overflow-y-auto p-5">
         <header className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Apple Pickup Watcher</h1>
@@ -591,79 +650,102 @@ export default function App() {
           </div>
         </header>
 
-        {selectedOrder !== null && (
+        <div className="grid shrink-0 gap-3 lg:min-h-0 lg:shrink lg:flex-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+          <div className="flex min-h-0 flex-col gap-3 lg:overflow-y-auto lg:pr-1">
+          {orderList.length > 0 && (
           // 付款这一步刻意留给用户：链接只把用户带到自己的购物袋，程序不接触
-          // 支付方式，也不替用户确认账单信息。
-          <div
-            role="status"
-            className={cn(
-              "grid gap-2 rounded-lg border px-4 py-3 text-sm",
-              selectedOrder.status === "added"
-                ? "border-in-stock/40 bg-in-stock/10"
-                : "border-destructive/30 bg-destructive/5",
-            )}
-          >
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              {selectedOrder.status === "added" ? (
-                <CreditCard className="text-in-stock size-4" />
-              ) : (
-                <AlertTriangle className="text-destructive size-4" />
-              )}
-              <p
-                className={cn(
-                  "font-medium",
-                  selectedOrder.status === "added" ? "text-in-stock" : "text-destructive",
-                )}
-              >
-                {selectedOrder.status === "added"
-                  ? "已加入购物袋，请完成付款"
-                  : "自动加购失败"}
-              </p>
-              <span className="text-muted-foreground text-xs">
-                {formatTime(selectedOrder.attemptedAtMs)}
-              </span>
-              {selectedOrder.status === "added" && selectedOrder.bagQuantity !== null && (
-                <Badge variant="outline" className="text-muted-foreground">
-                  购物袋 {selectedOrder.bagQuantity} 件
-                </Badge>
-              )}
-            </div>
-            <p>
-              {selectedOrder.productName}
-              <span className="text-muted-foreground"> · {selectedOrder.storeTitle}</span>
-            </p>
-            <p className="text-muted-foreground">{selectedOrder.message}</p>
-            {selectedOrder.paymentUrl !== "" && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Input
-                  readOnly
-                  aria-label="付款链接"
-                  className="h-8 min-w-64 flex-1 font-mono text-xs select-text"
-                  value={selectedOrder.paymentUrl}
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <Button
-                  size="sm"
-                  onClick={() => void openPaymentLink(selectedOrder.paymentUrl)}
-                >
-                  <ExternalLink /> 打开付款链接
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => void copyPaymentLink(selectedOrder.paymentUrl)}
-                >
-                  <Copy /> 复制
-                </Button>
-              </div>
-            )}
-            {selectedOrder.status === "added" && (
+          // 支付方式，也不替用户确认账单信息。多账号时按时间列出每一单。
+          <section className="bg-card grid gap-2 rounded-xl border px-4 py-3 shadow-xs">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <h2 className="text-sm font-medium">订单与付款链接</h2>
               <p className="text-muted-foreground text-xs">
-                付款链接绑定导入 Cookie 的同一浏览器会话。换浏览器、换设备或清掉 Cookie
-                后打开，可能只看到一个空购物袋。
+                到货后自动加入对应账号的购物袋；打开或复制链接交给客户付款。
               </p>
-            )}
-          </div>
+            </div>
+            <div className="grid gap-2">
+              {orderList.map(({ accountName, order }) => (
+                <div
+                  key={order.id}
+                  className={cn(
+                    "grid gap-1.5 rounded-lg border px-3 py-2.5 text-sm",
+                    order.status === "added"
+                      ? "border-in-stock/40 bg-in-stock/10"
+                      : "border-destructive/30 bg-destructive/5",
+                  )}
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {order.status === "added" ? (
+                      <CreditCard className="text-in-stock size-4" />
+                    ) : (
+                      <AlertTriangle className="text-destructive size-4" />
+                    )}
+                    <p
+                      className={cn(
+                        "font-medium",
+                        order.status === "added" ? "text-in-stock" : "text-destructive",
+                      )}
+                    >
+                      {order.status === "added" ? "已加入购物袋，等待付款" : "自动加购失败"}
+                    </p>
+                    <Badge variant="outline" className="text-muted-foreground">
+                      {accountName}
+                    </Badge>
+                    <span className="text-muted-foreground text-xs">
+                      {formatTime(order.attemptedAtMs)}
+                    </span>
+                    {order.status === "added" && order.bagQuantity !== null && (
+                      <Badge variant="outline" className="text-muted-foreground">
+                        购物袋 {order.bagQuantity} 件
+                      </Badge>
+                    )}
+                    {order.paymentUrl !== "" && (
+                      <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                        <Button size="sm" onClick={() => void openPaymentLink(order.paymentUrl)}>
+                          <ExternalLink /> 打开付款
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void copyPaymentLink(order.paymentUrl)}
+                        >
+                          <Copy /> 复制链接
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void copyText(
+                              describeOrderMessage(order),
+                              "订单与付款链接已复制，直接粘贴发给客户即可。",
+                            )
+                          }
+                        >
+                          <Send /> 发给用户
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  <p>
+                    {order.productName}
+                    <span className="text-muted-foreground"> · {order.storeTitle}</span>
+                  </p>
+                  {order.paymentUrl !== "" && (
+                    <p
+                      aria-label="付款链接"
+                      className="text-muted-foreground font-mono text-xs break-all select-text"
+                    >
+                      {order.paymentUrl}
+                    </p>
+                  )}
+                  <p className="text-muted-foreground text-xs">{order.message}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-muted-foreground text-xs">
+              付款链接绑定导入 Cookie 的同一浏览器会话。换浏览器、换设备或清掉 Cookie
+              后打开，可能只看到一个空购物袋。
+            </p>
+          </section>
         )}
 
         {ui.trouble !== null && (
@@ -1291,25 +1373,55 @@ export default function App() {
           </div>
         </Panel>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Stat label="监控" value={ui.rows.length} />
-          <Stat label="有货" value={summary.inStock} tone="inStock" />
-          <Stat label="无货" value={summary.outOfStock} />
-          {summary.untrusted > 0 && (
-            // 「其中多少项查不到」单独点出来：这个数字大于 0 时，
-            // 表格里那些「无货」也未必反映真实情况。
-            <Stat label="查不到" value={summary.untrusted} tone="unknown" />
-          )}
+          </div>
+
+          <div className="flex min-h-0 flex-col gap-3">
+        <section className="bg-card flex min-h-[360px] flex-1 flex-col overflow-hidden rounded-xl border shadow-xs">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-4 py-2.5">
+            <h2 className="shrink-0 text-sm font-medium">监控列表</h2>
+            <span className="text-muted-foreground shrink-0 text-xs">
+              {selectedAccount?.name ?? "未选择账号"} · 每行一条独立监控
+            </span>
+            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+              <FilterChip
+                label="全部"
+                count={ui.rows.length}
+                active={statusFilter === "all"}
+                onClick={() => setStatusFilter("all")}
+              />
+              <FilterChip
+                label="有货"
+                count={summary.inStock}
+                tone="inStock"
+                active={statusFilter === "in_stock"}
+                onClick={() => setStatusFilter("in_stock")}
+              />
+              <FilterChip
+                label="无货"
+                count={summary.outOfStock}
+                active={statusFilter === "out_of_stock"}
+                onClick={() => setStatusFilter("out_of_stock")}
+              />
+              {summary.untrusted > 0 && (
+                // 「其中多少项查不到」单独点出来：这个数字大于 0 时，
+                // 列表里那些「无货」也未必反映真实情况。
+                <FilterChip
+                  label="查不到"
+                  count={summary.untrusted}
+                  tone="unknown"
+                  active={statusFilter === "unknown"}
+                  onClick={() => setStatusFilter("unknown")}
+                />
+              )}
+            </div>
+          </div>
           {ui.running && ui.pacing !== null && ui.pacing.paced && (
             // 请求预算在拉长间隔时明说，否则用户会以为设的 30 秒没生效。
-            <span className="text-muted-foreground ml-auto text-sm">
+            <p className="text-muted-foreground border-b px-4 py-1.5 text-xs">
               受 Apple 频率限制，下一轮 {ui.pacing.nextCheckInSecs} 秒后
-            </span>
+            </p>
           )}
-        </div>
-
-        <section className="bg-card min-h-0 flex-1 overflow-hidden rounded-xl border shadow-xs">
-          <ScrollArea className="h-full">
+          <ScrollArea className="min-h-0 flex-1">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -1321,14 +1433,18 @@ export default function App() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {ui.rows.length === 0 ? (
+                {visibleRows.length === 0 ? (
                   <TableRow className="hover:bg-transparent">
                     <TableCell colSpan={5} className="text-muted-foreground h-28 text-center">
-                      {ui.ready ? "还没有监控目标。在上面选好门店和型号，点「添加」。" : "正在载入…"}
+                      {ui.rows.length === 0
+                        ? ui.ready
+                          ? "还没有监控目标。在上面选好门店和型号，点「添加」。"
+                          : "正在载入…"
+                        : "当前筛选下没有监控项。"}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  ui.rows.map((row) => (
+                  visibleRows.map((row) => (
                     <TableRow
                       key={targetKey(row.target)}
                       // 有货的行整行铺一层有货色。这一刻是这个程序存在的全部理由，
@@ -1394,6 +1510,8 @@ export default function App() {
             </div>
           </ScrollArea>
         </section>
+          </div>
+        </div>
       </div>
     </TooltipProvider>
   );
