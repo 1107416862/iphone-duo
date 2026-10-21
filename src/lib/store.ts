@@ -589,6 +589,27 @@ export async function saveAccountSession(
   }
 }
 
+export async function openAccountLogin(accountId: string): Promise<void> {
+  try {
+    await invoke("open_account_login", { accountId });
+    pushLog("已打开 Apple 官方登录窗口。完成登录后回到这里点击「保存登录 Cookie」。");
+  } catch (err) {
+    pushLog(`打开 Apple 登录窗口失败：${String(err)}`);
+  }
+}
+
+export async function saveAccountLoginCookies(accountId: string): Promise<Account | null> {
+  try {
+    const account = await invoke<Account>("save_account_login_cookies", { accountId });
+    update({ accounts: replaceAccount(account) });
+    pushLog("已从登录窗口读取并保存 Apple Cookie；现在可以校验会话。");
+    return account;
+  } catch (err) {
+    pushLog(`保存登录 Cookie 失败：${String(err)}`);
+    return null;
+  }
+}
+
 export async function clearAccountSession(accountId: string): Promise<Account | null> {
   try {
     const account = await invoke<Account>("clear_account_session", { accountId });

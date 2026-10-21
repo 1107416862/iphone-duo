@@ -7,6 +7,8 @@ function renderApp() {
   const addedTargets = [];
   const pushSaves = [];
   const sessionSaves = [];
+  const loginOpens = [];
+  const loginCookieSaves = [];
   const openedLinks = [];
   const selectedAccounts = [];
   const manualOrders = [];
@@ -46,6 +48,11 @@ function renderApp() {
       },
       clearAccountSession: async () => null,
       checkAccountSession: async () => null,
+      openAccountLogin: async (accountId) => { loginOpens.push(accountId); },
+      saveAccountLoginCookies: async (accountId) => {
+        loginCookieSaves.push(accountId);
+        return state.accounts.find((account) => account.id === accountId) ?? null;
+      },
       startAllAccounts: async () => {},
       stopAllAccounts: async () => {},
       placeOrder: async (accountId, target) => { manualOrders.push([accountId, target]); return null; },
@@ -120,12 +127,17 @@ function renderApp() {
     saveSession: () => control((element) => element.type === "Button" &&
       (element.props.children === "保存会话" ||
         (Array.isArray(element.props.children) && element.props.children.includes(" 保存会话")))),
+    loginApple: () => control((element) => element.type === "Button" &&
+      Array.isArray(element.props.children) && element.props.children.includes(" 登录 Apple")),
+    saveLoginCookies: () => control((element) => element.type === "Button" &&
+      Array.isArray(element.props.children) && element.props.children.includes(" 保存登录 Cookie")),
     paymentLink: () => control((element) => element?.props?.["aria-label"] === "付款链接"),
     orderButton: () => control((element) =>
       element?.props?.["aria-label"] === "把这条加入当前账号购物袋"),
     openPayment: () => control((element) => element.type === "Button" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 打开付款链接")),
-    state, saved, addedTargets, pushSaves, sessionSaves, openedLinks, selectedAccounts,
+    state, saved, addedTargets, pushSaves, sessionSaves, loginOpens, loginCookieSaves,
+    openedLinks, selectedAccounts,
     manualOrders,
   };
 }
@@ -405,6 +417,20 @@ test("an empty cookie box cannot be saved; a pasted cookie is saved for the sele
   app.saveSession().onClick();
   await new Promise(setImmediate);
   assert.deepEqual(app.sessionSaves, [["acct_1", "dssid2=abc; as_dc=ucp4"]]);
+});
+
+test("the account session panel can open Apple login and save cookies from that window", async () => {
+  const app = renderApp();
+  app.state.accounts = [account("acct_1", "主账号")];
+  app.state.selectedAccountId = "acct_1";
+
+  app.loginApple().onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(app.loginOpens, ["acct_1"]);
+
+  app.saveLoginCookies().onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(app.loginCookieSaves, ["acct_1"]);
 });
 
 test("a completed auto-order shows a payment link and an explicit same-session warning", () => {

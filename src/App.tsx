@@ -9,6 +9,7 @@ import {
   Download,
   ExternalLink,
   KeyRound,
+  LogIn,
   Pause,
   Play,
   Plus,
@@ -66,10 +67,12 @@ import {
   deleteAccount,
   dismissUpdate,
   installUpdate,
+  openAccountLogin,
   openPaymentLink,
   placeOrder,
   refreshProducts,
   saveAccountSession,
+  saveAccountLoginCookies,
   saveSettings,
   selectAccount,
   setCategory,
@@ -502,6 +505,8 @@ export default function App() {
     if (created) {
       setNewAccountName("");
       setNewAccountAppleId("");
+      // 新账号创建后直接打开该账号专属的 Apple 登录窗口，用户登录完成再回来保存 Cookie。
+      void openAccountLogin(created.id);
     }
   }
 
@@ -521,6 +526,16 @@ export default function App() {
     const saved = await saveAccountSession(selectedAccount.id, sessionDraft);
     // 保存成功后立刻丢掉草稿：原值不在界面上多停留一秒。
     if (saved) setSessionDraft("");
+  }
+
+  async function onSaveLoginCookies() {
+    if (!selectedAccount) return;
+    const saved = await saveAccountLoginCookies(selectedAccount.id);
+    if (saved) {
+      setSessionDraft("");
+      // 保存后立刻校验一次，界面能直接显示「已登录 / 访客 / 已失效」。
+      await checkAccountSession(saved.id);
+    }
   }
 
   return (
@@ -859,6 +874,20 @@ export default function App() {
                     <Button
                       size="sm"
                       variant="secondary"
+                      onClick={() => void openAccountLogin(selectedAccount.id)}
+                    >
+                      <LogIn /> 登录 Apple
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void onSaveLoginCookies()}
+                    >
+                      <KeyRound /> 保存登录 Cookie
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       disabled={!selectedAccount.session.configured}
                       onClick={() => void checkAccountSession(selectedAccount.id)}
                     >
@@ -899,7 +928,8 @@ export default function App() {
                     保存会话
                   </Button>
                   <p className="text-muted-foreground min-w-0 flex-1 text-xs">
-                    Cookie 会以明文保存在本机账号文件中，属于敏感信息；建议使用专门的浏览器配置，
+                    推荐流程：点「登录 Apple」→ 在官方窗口完成登录 → 回到这里点「保存登录 Cookie」。
+                    也可以继续手动粘贴 Cookie。Cookie 会以明文保存在本机账号文件中，属于敏感信息；
                     不要分享该文件，也不要在截图里露出。保存空内容不会清空会话，清空请点「清除会话」。
                   </p>
                 </div>

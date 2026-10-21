@@ -29,7 +29,7 @@ use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::Mutex;
 
@@ -44,6 +44,27 @@ const EVENT_CHANNEL: &str = "watcher://event";
 const ORDER_CHANNEL: &str = "watcher://order";
 /// 启动过程中的降级说明通道：配置读不出来之类的事必须让用户看见。
 const NOTICE_CHANNEL: &str = "watcher://notice";
+
+/// 每个账号的 Apple 登录窗口使用独立 label 和独立 WebView 数据目录。
+/// 这样两个账号即使先后登录，也不会共用同一份浏览器 Cookie。
+fn login_window_label(account_id: &str) -> String {
+    format!("apple-login-{account_id}")
+}
+
+/// Apple 商店登录页。中国大陆使用独立的 secure 域名，其余地区走对应的
+/// storefront 路径；登录完成后 Cookie 会落在该地区的 Apple 域上。
+fn apple_sign_in_url(locale: &str) -> &'static str {
+    match locale {
+        "zh_CN" => "https://secure.www.apple.com.cn/shop/signIn",
+        "zh_HK" => "https://secure.store.apple.com/hk-zh/shop/signIn",
+        "zh_TW" => "https://secure.store.apple.com/tw/shop/signIn",
+        "ja_JP" => "https://secure.store.apple.com/jp/shop/signIn",
+        "en_SG" => "https://secure.store.apple.com/sg/shop/signIn",
+        "en_AU" => "https://secure.store.apple.com/au/shop/signIn",
+        "en_MY" => "https://secure.store.apple.com/my/shop/signIn",
+        _ => "https://secure.store.apple.com/shop/signIn",
+    }
+}
 
 /// 一次自动加购成功后，静默多久再允许下一次自动加购。
 ///
@@ -556,6 +577,14 @@ async fn set_account_session(
     account_id: String,
     cookies: String,
 ) -> Result<AccountDto, String> {
+    persist_account_session(&state, &account_id, &cookies).await
+}
+
+async fn persist_account_session(
+    state: &AppState,
+    account_id: &str,
+    cookies: &str,
+) -> Result<AccountDto, String> {
     let raw = cookies.trim().to_string();
     if raw.is_empty() {
         // 空输入不能被当成「清空会话」：界面上的保存按钮很容易在空文本框时被
@@ -569,17 +598,108 @@ async fn set_account_session(
         ));
     }
     let mut probe = state
-        .account(&account_id)
+        .account(account_id)
         .ok_or_else(|| "账号不存在".to_string())?;
     probe.session.set_cookies(&raw);
     if !probe.session.has_cookies() {
         return Err("没有解析出有效的 Cookie，请粘贴 `name=value; name2=value2` 形式的内容".into());
     }
 
-    let updated = state.mutate_account(&account_id, |account| {
+    let updated = state.mutate_account(account_id, |account| {
         account.session.set_cookies(&raw);
     })?;
-    Ok(account_dto(&state, &updated).await)
+    Ok(account_dto(state, &updated).await)
+}
+
+/// 打开该账号专属的 Apple 登录窗口。
+///
+/// WebView 数据目录按账号隔离：Cookie 只在本地磁盘上，读取后由
+/// `save_account_login_cookies` 复制进账号会话文件，供 Rust 侧的库存/加购请求使用。
+#[tauri::command]
+async fn open_account_login(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<(), String> {
+    let account = state
+        .account(&account_id)
+        .ok_or_else(|| "账号不存在".to_string())?;
+    let region = region_by_locale(&account.locale)
+        .ok_or_else(|| format!("认不出地区 {}", account.locale))?;
+    let label = login_window_label(&account_id);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|err| format!("找不到应用数据目录：{err}"))?
+        .join("login-webviews")
+        .join(&account_id);
+    std::fs::create_dir_all(&data_dir).map_err(|err| format!("创建登录数据目录失败：{err}"))?;
+
+    let url = apple_sign_in_url(region.locale)
+        .parse()
+        .map_err(|err| format!("构造 Apple 登录地址失败：{err}"))?;
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url))
+        .title(format!("登录 Apple · {}", account.name))
+        .inner_size(1120.0, 800.0)
+        .min_inner_size(760.0, 560.0)
+        .data_directory(data_dir)
+        .build()
+        .map_err(|err| format!("打开 Apple 登录窗口失败：{err}"))?;
+    Ok(())
+}
+
+/// 从该账号的登录窗口读取 Apple 商店 Cookie，并保存到账号会话。
+///
+/// `cookies_for_url` 只返回会发给目标商店域（含 `/shop` 路径）的 Cookie，
+/// 避免把其他站点的项混进请求头。Windows 上读取 Cookie 可能等待 WebView2，
+/// 因此放到阻塞线程里执行。
+#[tauri::command]
+async fn save_account_login_cookies(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<AccountDto, String> {
+    let account = state
+        .account(&account_id)
+        .ok_or_else(|| "账号不存在".to_string())?;
+    let region = region_by_locale(&account.locale)
+        .ok_or_else(|| format!("认不出地区 {}", account.locale))?;
+    let label = login_window_label(&account_id);
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "登录窗口没有打开；请先点击「登录 Apple」并完成登录".to_string())?;
+    let url = format!("{}/shop/bag", region.base_url)
+        .parse()
+        .map_err(|err| format!("构造 Cookie 读取地址失败：{err}"))?;
+
+    let cookies = tauri::async_runtime::spawn_blocking(move || window.cookies_for_url(url))
+        .await
+        .map_err(|err| format!("读取登录 Cookie 失败：{err}"))?
+        .map_err(|err| format!("读取登录 Cookie 失败：{err}"))?;
+
+    let mut seen = HashSet::new();
+    let raw = cookies
+        .into_iter()
+        .filter(|cookie| !cookie.name().trim().is_empty())
+        .filter(|cookie| seen.insert(cookie.name().to_string()))
+        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if raw.is_empty() {
+        return Err(
+            "登录窗口里还没有读到 Apple Cookie。请确认已登录成功，并停留在 Apple 商店页面后再保存"
+                .into(),
+        );
+    }
+    persist_account_session(&state, &account_id, &raw).await
 }
 
 #[tauri::command]
@@ -1401,6 +1521,8 @@ pub fn run() {
             update_account,
             delete_account,
             set_account_session,
+            open_account_login,
+            save_account_login_cookies,
             clear_account_session,
             check_account_session,
             set_account_targets,
