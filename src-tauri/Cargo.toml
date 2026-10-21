@@ -1,0 +1,38 @@
+[package]
+name = "apw-app"
+description = "Apple 直营店到店取货库存监控"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# _lib 后缀不是多余的：Windows 上库名与二进制同名会冲突。
+# 见 https://github.com/rust-lang/cargo/issues/8519
+name = "apw_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+apw-core = { path = "../crates/apw-core", default-features = false, features = ["notifications"] }
+# tray-icon：系统托盘。这类工具会被长时间挂着盯库存，
+# 能收进托盘后台跑，比占着一个 Dock 图标和窗口合理得多。
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-opener = "2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[features]
+# 桌面版默认保留 Chrome TLS 指纹，和原来的构建行为一致。只有在本机缺少
+# CMake/编译器、无法构建 BoringSSL 时，才用 --no-default-features 做本地检查；
+# 发布构建必须保留默认值。
+default = ["chrome-tls"]
+chrome-tls = ["apw-core/chrome-tls"]
+
